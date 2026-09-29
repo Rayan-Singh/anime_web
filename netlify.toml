@@ -4,6 +4,10 @@
 
 [build.environment]
   NODE_VERSION = "22"
+  # These values are public runtime configuration, not credentials. Keeping
+  # them out of value matching avoids false positives while real secrets such
+  # as AUTH_SESSION_SECRET and PROVIDER_API_KEY remain protected.
+  SECRETS_SCAN_OMIT_KEYS = "CATALOG_SOURCE,PROVIDER_SEARCH_PATH,PROVIDER_USER_AGENT,PROVIDER_ORIGIN,PROVIDER_REFERER,PROVIDER_TIMEOUT_MS"
 
 [functions]
   directory = "netlify/functions"

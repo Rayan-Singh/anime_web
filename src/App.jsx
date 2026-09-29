@@ -26,8 +26,58 @@ const mergeChapterData = (preferred, fallback) => ({
   outro: preferred?.outro || fallback?.outro || null,
   duration: preferred?.duration || fallback?.duration || null,
 });
+const inspectRedirectUrl = 'https://www.youtube.com/';
+
+function useInspectRedirect() {
+  useEffect(() => {
+    let redirected = false;
+    const redirect = () => {
+      if (redirected) return;
+      redirected = true;
+      window.location.replace(inspectRedirectUrl);
+    };
+    const onKeyDown = (event) => {
+      const key = event.key.toLowerCase();
+      const windowsDevtools = event.ctrlKey && event.shiftKey && ['i', 'j', 'c'].includes(key);
+      const macDevtools = event.metaKey && event.altKey && ['i', 'j', 'c'].includes(key);
+      const viewSource = (event.ctrlKey || event.metaKey) && key === 'u';
+      if (event.key === 'F12' || windowsDevtools || macDevtools || viewSource) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        redirect();
+      }
+    };
+    const detectDockedDevtools = () => {
+      if (window.innerWidth < 768) return;
+      const widthGap = Math.max(0, window.outerWidth - window.innerWidth);
+      const heightGap = Math.max(0, window.outerHeight - window.innerHeight);
+      if (widthGap > 220 || heightGap > 220) redirect();
+    };
+    const detectDebugger = () => {
+      const startedAt = performance.now();
+      // This pauses only when a desktop debugger is actively attached.
+      debugger; // eslint-disable-line no-debugger
+      if (performance.now() - startedAt > 160) redirect();
+    };
+
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('resize', detectDockedDevtools);
+    const detector = window.setInterval(() => {
+      detectDockedDevtools();
+      detectDebugger();
+    }, 1200);
+    const initialCheck = window.setTimeout(detectDockedDevtools, 400);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('resize', detectDockedDevtools);
+      window.clearInterval(detector);
+      window.clearTimeout(initialCheck);
+    };
+  }, []);
+}
 
 export default function App() {
+  useInspectRedirect();
   const [page, setPage] = useState('Home');
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
