@@ -1,0 +1,24 @@
+{
+  "name": "kairo-anime-netlify",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "node server.mjs --production",
+    "test": "node tests/contract.mjs"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^10.0.10",
+    "@vitejs/plugin-react": "latest",
+    "express": "latest",
+    "hls.js": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "serverless-http": "^4.0.0",
+    "undici": "^8.11.2",
+    "vite": "latest"
+  }
+}
