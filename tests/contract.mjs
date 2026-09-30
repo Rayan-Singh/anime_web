@@ -95,6 +95,11 @@ try {
   check('extracts intro chapter', servers.body.chapters.intro?.start === 12 && servers.body.chapters.intro?.end === 102);
   check('extracts outro chapter', servers.body.chapters.outro?.start === 1350);
 
+  const blockedServers = await getJson('/api/provider/servers/licensed-test-title/99');
+  check('maps provider challenges to a gateway error', blockedServers.status === 502, String(blockedServers.status));
+  check('reports provider browser challenges clearly', blockedServers.body.message?.includes('browser verification challenge'), blockedServers.body.message);
+  check('does not expose provider HTML', !/[<>]/.test(blockedServers.body.message || ''), blockedServers.body.message);
+
   console.log('\nplayback');
   const playback = await getJson('/api/provider/playback/licensed-episode-1');
   check('returns https url', /^https:\/\//.test(playback.body.url), playback.body.url);

@@ -31,11 +31,17 @@ export async function fetchJson(url, { method = 'GET', headers = {}, body, timeo
       signal: controller.signal,
     });
     const text = await response.body.text();
-    const payload = text ? safeParse(text) : {};
+    const parsed = text ? safeParse(text) : { valid: true, value: {} };
+    const payload = parsed.value;
+    const nonJsonMessage = parsed.valid ? '' : nonJsonResponseMessage(text, response.headers['content-type']);
     if (response.statusCode >= 400) {
       const retryAfter = response.headers['retry-after'];
+      // An upstream 4xx/5xx is a provider failure from this API's point of
+      // view. Never pass an HTML error or bot-challenge document to the UI.
+      if (nonJsonMessage) throw httpError(502, nonJsonMessage);
       throw httpError(response.statusCode, messageFrom(payload, response.statusCode, retryAfter));
     }
+    if (nonJsonMessage) throw httpError(502, nonJsonMessage);
     return payload;
   } catch (error) {
     if (error.name === 'AbortError' || error.code === 'UND_ERR_HEADERS_TIMEOUT' || error.code === 'UND_ERR_BODY_TIMEOUT') {
@@ -48,7 +54,20 @@ export async function fetchJson(url, { method = 'GET', headers = {}, body, timeo
 }
 
 function safeParse(text) {
-  try { return JSON.parse(text); } catch { return { message: text.slice(0, 300) }; }
+  try { return { valid: true, value: JSON.parse(text) }; }
+  catch { return { valid: false, value: null }; }
+}
+
+function nonJsonResponseMessage(text, contentType = '') {
+  const sample = text.slice(0, 2_000).toLowerCase();
+  const isHtml = /text\/html/i.test(String(contentType)) || /^\s*<!doctype html|^\s*<html/i.test(text);
+  if (!isHtml) return 'Upstream service returned an invalid response. Please try again later.';
+  const isChallenge = sample.includes('just a moment')
+    || sample.includes('cf-chl-')
+    || sample.includes('challenge-platform')
+    || sample.includes('cloudflare');
+  if (isChallenge) return 'The playback provider blocked this server request with a browser verification challenge. Try another server or contact the provider administrator.';
+  return 'Upstream service returned an HTML page instead of JSON. Please try again later.';
 }
 
 function messageFrom(payload, status, retryAfter) {

@@ -59,6 +59,11 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/home' || url.pathname === '/search') return send({ results: [title] });
   if (url.pathname === '/info/licensed-test-title') return send(title);
   if (url.pathname === '/episodes/licensed-test-title') return send({ episodes });
+  if (url.pathname === '/servers/licensed-test-title/99') {
+    res.statusCode = 403;
+    res.setHeader('content-type', 'text/html; charset=UTF-8');
+    return res.end('<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>cf-chl-bypass</body></html>');
+  }
   if (/^\/servers\/licensed-test-title\/\d+$/.test(url.pathname)) return send(servers);
   if (url.pathname.startsWith('/stream/')) return send(stream);
   if (url.pathname.startsWith('/thumbnails/')) return send({ vtt: null, sprites: [] });
