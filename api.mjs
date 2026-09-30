@@ -7,6 +7,7 @@ import { createHmac, createHash, randomBytes, scrypt as scryptCallback, timingSa
 import { promisify } from 'node:util';
 import * as catalog from './catalog.mjs';
 import { fetchJson, httpError } from './http.mjs';
+import { availableLanguages, extractChapters, fillPath, matchProviderSlug, mergeServers, shapePlayback, unwrapEpisodes } from './provider-shape.mjs';
 
 const root = process.cwd();
 const env = { ...process.env };
@@ -209,7 +210,16 @@ app.put('/api/account/progress/:key', requireAccount, asyncRoute(async (req, res
   res.json({ progress: entry });
 }));
 
-const baseUrl = env.PROVIDER_BASE_URL?.replace(/\/$/, '');
+/**
+ * PROVIDER_BASE_URL accepts a comma-separated list. The first entry is the
+ * primary; the rest are mirrors tried in order when one is unreachable or
+ * answers with a bot challenge instead of JSON.
+ */
+const baseUrls = String(env.PROVIDER_BASE_URL || '')
+  .split(',')
+  .map((value) => value.trim().replace(/\/$/, ''))
+  .filter(Boolean);
+const baseUrl = baseUrls[0] || '';
 export const providerConfigured = Boolean(baseUrl);
 const endpoint = (key, fallback) => env[key] || fallback;
 const embedLinksEnabled = String(env.PROVIDER_EMBED_LINKS || '').toLowerCase() === 'true';
@@ -217,6 +227,32 @@ const resolveByAnilistId = String(env.PROVIDER_RESOLVE_BY_ANILIST_ID || '').toLo
 const embedAudioParam = String(env.PROVIDER_EMBED_AUDIO_PARAM || '').trim();
 const embedSubValue = String(env.PROVIDER_EMBED_SUB_VALUE ?? '0');
 const embedDubValue = String(env.PROVIDER_EMBED_DUB_VALUE ?? '1');
+const shapeOptions = { embedLinks: embedLinksEnabled, embedAudioParam, embedSubValue, embedDubValue };
+
+/**
+ * Client-direct mode lets the browser call the provider itself. The visitor's
+ * own address and browser satisfy any bot check the provider applies, which a
+ * serverless function cannot do. It requires the provider to send permissive
+ * CORS headers, so the same-origin routes below stay as the fallback.
+ *
+ * A provider that needs a credential cannot be called from the browser without
+ * handing that credential to every visitor, so a configured API key disables it.
+ */
+const clientDirectRequested = String(env.PROVIDER_CLIENT_DIRECT || '').toLowerCase() === 'true';
+const clientDirectEnabled = clientDirectRequested && Boolean(baseUrl) && !env.PROVIDER_API_KEY;
+if (clientDirectRequested && env.PROVIDER_API_KEY) {
+  console.warn('[provider] PROVIDER_CLIENT_DIRECT ignored: PROVIDER_API_KEY would be exposed to every visitor');
+}
+const clientDirectConfig = () => (clientDirectEnabled ? {
+  baseUrls,
+  serversPath: endpoint('PROVIDER_SERVERS_PATH', '/servers/{slug}/{episode}'),
+  searchPath: endpoint('PROVIDER_SEARCH_PATH', '/search'),
+  episodesPath: endpoint('PROVIDER_EPISODES_PATH', '/episodes/{slug}'),
+  playbackPath: env.PROVIDER_PLAYBACK_PATH || null,
+  resolveByAnilistId,
+  ...shapeOptions,
+} : null);
+
 const defaultCatalogSource = catalog.normalizeSource(env.CATALOG_SOURCE, 'auto');
 const catalogSource = (req) => catalog.normalizeSource(req.query.source, defaultCatalogSource);
 
@@ -233,17 +269,34 @@ function authHeaders() {
   return headers;
 }
 
+/**
+ * Statuses that are a property of the mirror rather than of the request: a
+ * challenge page, an IP block, a rate limit, or an outage. A 400/401/404 means
+ * the next mirror would answer the same way, so those propagate immediately.
+ */
+const FAILOVER_STATUS = new Set([403, 408, 425, 429, 500, 502, 503, 504]);
+
 async function providerRequest(providerPath, query = {}) {
-  if (!baseUrl) throw httpError(503, 'Provider is not configured');
-  const url = new URL(`${baseUrl}${providerPath.startsWith('/') ? providerPath : `/${providerPath}`}`);
-  Object.entries(query).forEach(([key, value]) => {
-    if (value !== undefined && value !== '') url.searchParams.set(key, String(value));
-  });
-  return fetchJson(url, { headers: authHeaders(), timeoutMs: Number(env.PROVIDER_TIMEOUT_MS || 12_000) });
+  if (!baseUrls.length) throw httpError(503, 'Provider is not configured');
+  const suffix = providerPath.startsWith('/') ? providerPath : `/${providerPath}`;
+  const timeoutMs = Number(env.PROVIDER_TIMEOUT_MS || 12_000);
+  let lastError;
+  for (const origin of baseUrls) {
+    const url = new URL(`${origin}${suffix}`);
+    Object.entries(query).forEach(([key, value]) => {
+      if (value !== undefined && value !== '') url.searchParams.set(key, String(value));
+    });
+    try {
+      return await fetchJson(url, { headers: authHeaders(), timeoutMs });
+    } catch (error) {
+      if (error.status && !FAILOVER_STATUS.has(Number(error.status))) throw error;
+      console.warn(`[provider] ${url.host}${suffix} unavailable (${error.status || error.code || 'network'}): ${error.message}`);
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
-const safePart = (value) => encodeURIComponent(String(value).replace(/[\r\n]/g, ''));
-const fillPath = (template, values) => Object.entries(values).reduce((result, [key, value]) => result.replaceAll(`{${key}}`, safePart(value)), template);
 const clamp = (value, min, max, fallback) => Math.min(max, Math.max(min, Number(value) || fallback));
 
 app.get('/api/provider/status', (_req, res) => {
@@ -253,6 +306,8 @@ app.get('/api/provider/status', (_req, res) => {
     catalogMode: defaultCatalogSource,
     catalogSources: catalog.sources,
     providerConfigured: Boolean(baseUrl),
+    providerMirrors: baseUrls.length,
+    clientDirect: clientDirectConfig(),
     playbackEnabled: Boolean(baseUrl && (env.PROVIDER_PLAYBACK_PATH || embedLinksEnabled)),
     thumbnailsEnabled: Boolean(baseUrl && env.PROVIDER_THUMBNAILS_PATH),
     mode: baseUrl ? 'authorized-provider' : 'catalog-only',
@@ -308,9 +363,7 @@ app.get('/api/provider/episodes/:slug', asyncRoute(async (req, res) => {
 async function resolveProviderEpisodes(providerSlug) {
   if (!baseUrl || !providerSlug) return null;
   const route = fillPath(endpoint('PROVIDER_EPISODES_PATH', '/episodes/{slug}'), { slug: providerSlug });
-  const payload = await providerRequest(route);
-  const list = Array.isArray(payload) ? payload : payload.episodes || payload.data || [];
-  return list.map((episode) => ({ ...episode, playable: true }));
+  return unwrapEpisodes(await providerRequest(route));
 }
 
 /** Bridges an AniList title to the configured provider's own slug by title match. */
@@ -323,13 +376,9 @@ app.get('/api/provider/resolve', asyncRoute(async (req, res) => {
     return res.json({ providerSlug: String(anilistId), matchedTitle: title });
   }
   const payload = await providerRequest(endpoint('PROVIDER_SEARCH_PATH', '/search'), { q: title, limit: 10 });
-  const list = Array.isArray(payload) ? payload : payload.results || payload.data || payload.anime || [];
-  const normalise = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  const wanted = normalise(title);
-  const match = list.find((item) => normalise(item.title?.english || item.title?.romaji || item.title || item.name) === wanted) || list[0];
-  const providerSlug = match?.slug || match?.id || match?.$id || match?.anilist_id || match?.anilistId || match?.anime_id || match?.animeId || null;
-  if (!providerSlug) return res.status(404).json({ message: 'No matching title at the configured provider' });
-  res.json({ providerSlug: String(providerSlug), matchedTitle: match.title?.english || match.title || match.name || title });
+  const matched = matchProviderSlug(payload, title);
+  if (!matched) return res.status(404).json({ message: 'No matching title at the configured provider' });
+  res.json(matched);
 }));
 
 /** Provider-side language counts are more current than catalog totals for long-running shows. */
@@ -359,123 +408,26 @@ app.get('/api/provider/availability', asyncRoute(async (req, res) => {
 
 /* ---------------------------------------------------------------- playback */
 
-/**
- * Quality preference for server names; anything unrecognised sorts last while
- * keeping its relative order.
- */
-const SERVER_RANK = { 'HD-2': 0, 'HD-1': 1, 'HD': 2, 'SD': 4 };
-const SUB_TYPES = new Set(['sub', 's-sub', 'subbed', 'softsub', 'soft-sub', 'hardsub', 'hard-sub', 'japanese', 'ja']);
-const DUB_TYPES = new Set(['dub', 's-dub', 'dubbed', 'english', 'en']);
-const DUAL_TYPES = new Set(['dual-audio', 'dual', 'both', 'multi-audio']);
-
-const serverId = (server) => server.accessId || server.streamId || server.$id || server.id || (embedLinksEnabled ? server.dataLink : null) || null;
-const serverType = (server) => String(server.dataType || server.type || server.language || '').toLowerCase();
-
-/**
- * Some dual-audio embed providers return the same URL for their SUB and DUB
- * server rows and select the actual audio track with a query parameter. Keep
- * that provider-specific detail on the server instead of leaking it into the UI.
- */
-function withEmbedAudio(server) {
-  if (!embedLinksEnabled || !embedAudioParam || !server.dataLink) return server;
-  const type = serverType(server);
-  const value = DUB_TYPES.has(type) ? embedDubValue : SUB_TYPES.has(type) ? embedSubValue : null;
-  if (value === null) return server;
-  try {
-    const url = new URL(server.dataLink);
-    if (!['https:', 'http:'].includes(url.protocol)) return server;
-    url.searchParams.set(embedAudioParam, value);
-    return { ...server, dataLink: url.href };
-  } catch {
-    return server;
-  }
-}
-
-/** Merges every server array the provider may return, de-duplicates, then ranks. */
-function mergeServers(payload) {
-  const root = payload?.data && !Array.isArray(payload.data) ? payload.data : payload;
-  const bucket = (value, hint = '') => ({ value, hint });
-  const buckets = [
-    bucket(Array.isArray(root) ? root : null), bucket(root?.data),
-    bucket(root?.sub, 'sub'), bucket(root?.dub, 'dub'), bucket(root?.raw, 'sub'),
-    bucket(root?.servers), bucket(root?.episode_links), bucket(root?.links),
-    bucket(root?.sources), bucket(root?.mirrors), bucket(root?.streamingLinks),
-    bucket(payload?.sub, 'sub'), bucket(payload?.dub, 'dub'), bucket(payload?.servers),
-  ];
-  const seen = new Set();
-  const merged = [];
-  for (const entry of buckets) {
-    if (!Array.isArray(entry.value)) continue;
-    for (const candidate of entry.value) {
-      if (!candidate || typeof candidate !== 'object') continue;
-      const type = serverType(candidate) || entry.hint;
-      const server = type ? { ...candidate, dataType: type } : candidate;
-      const id = serverId(server);
-      const dedupeKey = `${type || 'unknown'}:${id}`;
-      if (!id || seen.has(dedupeKey)) continue;
-      seen.add(dedupeKey);
-      const prepared = withEmbedAudio({ ...server, accessId: String(id) });
-      if (!embedLinksEnabled) delete prepared.dataLink;
-      merged.push(prepared);
-    }
-  }
-  const rank = (server) => SERVER_RANK[String(server.serverName || server.name || '').toUpperCase()] ?? 3;
-  const sorted = merged
-    .map((server, index) => ({ server, index }))
-    .sort((a, b) => rank(a.server) - rank(b.server) || a.index - b.index)
-    .map(({ server }) => server);
-
-  const explicitSub = Array.isArray(root?.sub) ? new Set(root.sub.map(serverId).map(String)) : null;
-  const explicitDub = Array.isArray(root?.dub) ? new Set(root.dub.map(serverId).map(String)) : null;
-  const untyped = sorted.filter((server) => !serverType(server));
-  return {
-    sub: sorted.filter((s) => SUB_TYPES.has(serverType(s)) || DUAL_TYPES.has(serverType(s)) || explicitSub?.has(s.accessId) || untyped.includes(s)),
-    dub: sorted.filter((s) => DUB_TYPES.has(serverType(s)) || DUAL_TYPES.has(serverType(s)) || explicitDub?.has(s.accessId)),
-    all: sorted,
-  };
-}
-
-const seconds = (value) => (Number.isFinite(Number(value)) ? Number(value) : null);
-
-function extractChapters(payload) {
-  const chapterData = payload?.data && !Array.isArray(payload.data) ? payload.data : payload;
-  const intro = { start: seconds(chapterData.intro_start ?? chapterData.introStart), end: seconds(chapterData.intro_end ?? chapterData.introEnd) };
-  const outro = { start: seconds(chapterData.outro_start ?? chapterData.outroStart), end: seconds(chapterData.outro_end ?? chapterData.outroEnd) };
-  return {
-    intro: intro.start !== null && intro.end !== null && intro.end > intro.start ? intro : null,
-    outro: outro.start !== null ? outro : null,
-    duration: seconds(chapterData.duration),
-  };
-}
-
 app.get('/api/provider/servers/:slug/:episode', asyncRoute(async (req, res) => {
   if (!baseUrl) return res.status(503).json({ message: 'Playback requires an authorized provider' });
   const route = fillPath(endpoint('PROVIDER_SERVERS_PATH', '/servers/{slug}/{episode}'), req.params);
   const payload = await providerRequest(route);
-  const { sub, dub, all } = mergeServers(payload);
+  const { sub, dub, all } = mergeServers(payload, shapeOptions);
   res.json({
     sub,
     dub,
     servers: all,
     chapters: extractChapters(payload),
-    availableLanguages: [['sub', sub], ['dub', dub]].filter(([, list]) => list.length).map(([key]) => key),
+    availableLanguages: availableLanguages({ sub, dub }),
   });
 }));
 
 app.get('/api/provider/playback/:accessId', asyncRoute(async (req, res) => {
   if (!env.PROVIDER_PLAYBACK_PATH) return res.status(503).json({ message: 'Licensed playback endpoint is not configured' });
   const route = fillPath(env.PROVIDER_PLAYBACK_PATH, { id: req.params.accessId });
-  const payload = await providerRequest(route);
-  const playbackUrl = payload?.url || payload?.playbackUrl || payload?.stream?.url;
-  if (!playbackUrl || !/^https:\/\//i.test(playbackUrl)) {
-    return res.status(502).json({ message: 'Provider did not return a valid HTTPS playback URL' });
-  }
-  res.json({
-    url: playbackUrl,
-    subtitles: payload.subtitles || [],
-    chapters: extractChapters(payload),
-    thumbnailsVtt: payload.thumbnails_vtt || payload.thumbnailsVtt || null,
-  });
+  const playback = shapePlayback(await providerRequest(route));
+  if (!playback) return res.status(502).json({ message: 'Provider did not return a valid HTTPS playback URL' });
+  res.json(playback);
 }));
 
 /** Storyboard sprites for scrub previews; only an authorized provider can supply these. */
@@ -515,8 +467,13 @@ app.get('/api/chapters/:malId/:episode', asyncRoute(async (req, res) => {
 
 /* ---------------------------------------------------------------- plumbing */
 
-app.use((error, _req, res, _next) => {
+app.use((error, req, res, _next) => {
   const status = Number(error.status) || 502;
+  // Upstream failures are only actionable with the mirror name, which stays in
+  // the function log rather than in the response the browser receives.
+  if (status >= 500) {
+    console.error(`[api] ${req.method} ${req.originalUrl} -> ${status}${error.upstreamHost ? ` via ${error.upstreamHost}` : ''}: ${error.message}`);
+  }
   res.status(status).json({ message: error.message || 'Upstream request failed' });
 });
 

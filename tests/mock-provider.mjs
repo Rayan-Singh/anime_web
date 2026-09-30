@@ -73,3 +73,12 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(9393, '127.0.0.1', () => console.log('Mock licensed provider running at http://127.0.0.1:9393'));
+
+/** A mirror that is permanently behind a bot challenge, so failover is exercised. */
+const challengedMirror = http.createServer((_req, res) => {
+  res.statusCode = 403;
+  res.setHeader('content-type', 'text/html; charset=UTF-8');
+  res.end('<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>cf-chl-bypass</body></html>');
+});
+
+challengedMirror.listen(9394, '127.0.0.1', () => console.log('Mock challenged mirror running at http://127.0.0.1:9394'));

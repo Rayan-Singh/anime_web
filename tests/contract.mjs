@@ -26,15 +26,15 @@ function start(script, env = {}) {
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function waitForServer(attempts = 40) {
+async function waitForServer(target = base, attempts = 40) {
   for (let i = 0; i < attempts; i++) {
     try {
-      const response = await fetch(`${base}/api/provider/status`);
+      const response = await fetch(`${target}/api/provider/status`);
       if (response.ok) return;
     } catch { /* not up yet */ }
     await wait(500);
   }
-  throw new Error('Server did not become ready');
+  throw new Error(`Server at ${target} did not become ready`);
 }
 
 function check(label, condition, detail = '') {
@@ -54,7 +54,9 @@ try {
   start(path.join(root, 'server.mjs'), {
     ARGS: '--production',
     PORT: String(PORT),
-    PROVIDER_BASE_URL: 'http://127.0.0.1:9393',
+    // The challenged mirror is listed first, so every provider check below only
+    // passes if failover reaches the healthy mirror.
+    PROVIDER_BASE_URL: 'http://127.0.0.1:9394,http://127.0.0.1:9393',
     PROVIDER_API_KEY: 'test-key',
     PROVIDER_SEARCH_PATH: '/search',
     PROVIDER_SERVERS_PATH: '/servers/{slug}/{episode}',
@@ -72,6 +74,7 @@ try {
   const status = await getJson('/api/provider/status');
   check('reports anilist catalog', status.body.catalogSource === 'anilist');
   check('reports provider configured', status.body.providerConfigured === true);
+  check('reports both provider mirrors', status.body.providerMirrors === 2, String(status.body.providerMirrors));
   check('reports playback enabled', status.body.playbackEnabled === true);
 
   console.log('\nresolve (AniList title -> provider slug)');
@@ -82,6 +85,7 @@ try {
 
   console.log('\nservers (merge + dedupe + rank + chapters)');
   const servers = await getJson('/api/provider/servers/licensed-test-title/1');
+  check('fails over past a challenged mirror', servers.status === 200, String(servers.status));
   const ids = servers.body.servers.map((s) => s.accessId);
   check('de-duplicates across buckets', new Set(ids).size === ids.length, ids.join(','));
   check('merges episode_links entries', ids.includes('licensed-episode-1-alt'), ids.join(','));
@@ -125,6 +129,31 @@ try {
   check('info falls back to AniList episodes', infoNoProvider.body.playableEpisodes === false && infoNoProvider.body.episodes.length > 0);
   const recs = await getJson(`/api/provider/recommendations/${anilistId}`);
   check('recommendations return titles', recs.body.results.length > 0);
+
+  console.log('\nclient-direct configuration');
+  check('withholds client-direct config while an API key is set', status.body.clientDirect === null, JSON.stringify(status.body.clientDirect));
+
+  const directBase = `http://127.0.0.1:${PORT + 1}`;
+  start(path.join(root, 'server.mjs'), {
+    ARGS: '--production',
+    PORT: String(PORT + 1),
+    PROVIDER_BASE_URL: 'http://127.0.0.1:9394,http://127.0.0.1:9393',
+    PROVIDER_CLIENT_DIRECT: 'true',
+    PROVIDER_SERVERS_PATH: '/servers/{slug}/{episode}',
+    PROVIDER_SEARCH_PATH: '/search',
+    PROVIDER_PLAYBACK_PATH: '/stream/{id}',
+    PROVIDER_EMBED_LINKS: 'true',
+    PROVIDER_EMBED_AUDIO_PARAM: 'a',
+  });
+  await waitForServer(directBase);
+  const direct = await (await fetch(`${directBase}/api/provider/status`)).json();
+  check('publishes client-direct config when no key is needed', Boolean(direct.clientDirect), JSON.stringify(direct.clientDirect));
+  check('publishes every mirror to the browser', direct.clientDirect?.baseUrls?.length === 2, JSON.stringify(direct.clientDirect?.baseUrls));
+  check('publishes the servers path template', direct.clientDirect?.serversPath === '/servers/{slug}/{episode}', direct.clientDirect?.serversPath);
+  check('publishes the episodes path template', direct.clientDirect?.episodesPath === '/episodes/{slug}', direct.clientDirect?.episodesPath);
+  check('publishes the playback path template', direct.clientDirect?.playbackPath === '/stream/{id}', String(direct.clientDirect?.playbackPath));
+  check('publishes embed audio shaping', direct.clientDirect?.embedLinks === true && direct.clientDirect?.embedAudioParam === 'a', JSON.stringify(direct.clientDirect));
+  check('never publishes a credential', !JSON.stringify(direct).toLowerCase().includes('test-key'), JSON.stringify(direct.clientDirect));
 
   console.log('\nerror handling');
   const badSearch = await getJson('/api/provider/search?q=');

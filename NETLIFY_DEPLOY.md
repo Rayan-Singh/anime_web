@@ -50,6 +50,65 @@ Also add `PROVIDER_API_KEY`, `PROVIDER_REFERER`, `PROVIDER_ORIGIN`, or other
 provider variables if your provider requires them. Never prefix server secrets
 with `VITE_`, because Vite-prefixed values are exposed to browsers.
 
+`PROVIDER_BASE_URL` accepts a comma-separated list. The first entry is the
+primary and the rest are mirrors, tried in order whenever one is unreachable,
+rate-limited, or answers with a bot-challenge page instead of JSON:
+
+```text
+PROVIDER_BASE_URL=https://primary.example/api,https://mirror.example/api
+```
+
+## Client-direct provider calls
+
+```text
+PROVIDER_CLIENT_DIRECT=true
+```
+
+With this set, the browser fetches the title match, the episode list, the server
+list, and the playback manifest from the provider itself instead of routing them
+through the Netlify Function. The visitor's own address and browser satisfy bot
+checks that reject a serverless function, which is the usual cure for the
+challenge described below. Catalog metadata still comes from the function, since
+AniList does not challenge server requests.
+
+Two conditions decide whether it helps:
+
+1. **The provider must send permissive CORS headers.** Check with:
+
+   ```powershell
+   curl.exe -I -H "Origin: https://YOUR-SITE.netlify.app" "https://YOUR-PROVIDER/servers/some-slug/1"
+   ```
+
+   An `access-control-allow-origin` header in the response means it will work.
+   Without one the browser blocks the read, and every call silently falls back
+   to the same-origin route, leaving behaviour exactly as it was.
+2. **The provider must not need a credential.** `PROVIDER_CLIENT_DIRECT` is
+   ignored whenever `PROVIDER_API_KEY` is set, because a browser-side call would
+   hand that key to every visitor. The function log says so on boot, and
+   `/api/provider/status` reports `clientDirect: null`.
+
+The first call blocked by a missing CORS header switches the tab back to the
+same-origin routes for the rest of the session, so a provider that does not
+allow this costs one failed request rather than one per page.
+
+## "Playback unavailable — browser verification challenge"
+
+This means the provider answered the Netlify Function with a Cloudflare-style
+challenge page rather than JSON. Netlify Functions call out from shared AWS
+datacenter addresses, which those protections challenge by default, so it
+usually appears on the deployed site while local development works. The fix is
+on the provider side, not in this code:
+
+1. Ask the provider administrator to allow server-to-server access for your
+   site — an API key, an allowlisted address, or a documented server endpoint.
+2. Set the credentials the provider expects: `PROVIDER_API_KEY`,
+   `PROVIDER_REFERER`, `PROVIDER_ORIGIN`, `PROVIDER_USER_AGENT`.
+3. Add a mirror to `PROVIDER_BASE_URL` that does permit server requests.
+
+The function log names the mirror that was blocked (`[provider] host/path
+unavailable …`), so check **Netlify → Logs → Functions** to see which entry
+failed. Working around the challenge itself is not supported.
+
 Generate a session secret locally with:
 
 ```powershell

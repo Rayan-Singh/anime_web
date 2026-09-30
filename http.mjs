@@ -22,6 +22,9 @@ export async function fetchJson(url, { method = 'GET', headers = {}, body, timeo
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // The host never reaches the browser: it only tags the error so function logs
+  // name the mirror that failed.
+  const fail = (status, message) => Object.assign(httpError(status, message), { upstreamHost: target.host });
   try {
     const response = await request(target, {
       method,
@@ -38,15 +41,16 @@ export async function fetchJson(url, { method = 'GET', headers = {}, body, timeo
       const retryAfter = response.headers['retry-after'];
       // An upstream 4xx/5xx is a provider failure from this API's point of
       // view. Never pass an HTML error or bot-challenge document to the UI.
-      if (nonJsonMessage) throw httpError(502, nonJsonMessage);
-      throw httpError(response.statusCode, messageFrom(payload, response.statusCode, retryAfter));
+      if (nonJsonMessage) throw fail(502, nonJsonMessage);
+      throw fail(response.statusCode, messageFrom(payload, response.statusCode, retryAfter));
     }
-    if (nonJsonMessage) throw httpError(502, nonJsonMessage);
+    if (nonJsonMessage) throw fail(502, nonJsonMessage);
     return payload;
   } catch (error) {
     if (error.name === 'AbortError' || error.code === 'UND_ERR_HEADERS_TIMEOUT' || error.code === 'UND_ERR_BODY_TIMEOUT') {
-      throw httpError(504, 'Upstream request timed out');
+      throw fail(504, 'Upstream request timed out');
     }
+    if (!error.upstreamHost) error.upstreamHost = target.host;
     throw error;
   } finally {
     clearTimeout(timer);
