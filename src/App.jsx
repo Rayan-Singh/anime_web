@@ -845,11 +845,6 @@ function WatchPlayer({ item, close, onProgress }) {
     clearTimeout(pendingServerTimer.current);
     pendingServerTimer.current = setTimeout(commit, 300);
   };
-  const retryPlayback = () => {
-    serverFailures.current.clear();
-    setError('');
-    setRetry((value) => value + 1);
-  };
   const start = () => { setStarted(true); setTimeout(() => video.current?.play().catch(() => {}), 0); };
   const skip = () => { if (!activeChapter) return; if (activeChapter.to === null) return queueNext(); if (video.current && source) video.current.currentTime = activeChapter.to; else embedFrame.current?.contentWindow?.postMessage({ command: 'seek', value: activeChapter.to }, '*'); };
   const togglePictureInPicture = async () => {
@@ -879,7 +874,7 @@ function WatchPlayer({ item, close, onProgress }) {
           {started && activeChapter && <button className="skip-chapter" onClick={skip}>{activeChapter.label}<Icon name="skip" size={16}/></button>}
           {!embedUrl && !started && source && <button className="big-play" onClick={start}><span><Icon name="play" size={34}/></span><strong>Start episode</strong><small>Authorized provider stream</small></button>}
           {loading && <div className="player-message"><span className="loader"/><strong>Loading {language.toUpperCase()} stream…</strong></div>}
-          {error && <div className="player-message error"><strong>Playback unavailable</strong><p>{error}</p><button className="secondary" onClick={retryPlayback}>Retry</button></div>}
+          {error && <div className="player-message error"><strong>Playback unavailable</strong><p>{error}</p><button className="secondary" onClick={() => setRetry((value) => value + 1)}>Retry</button></div>}
           {countdown !== null && <div className="autonext-overlay"><div><small>NEXT EPISODE PLAYING IN</small><strong>{countdown}s</strong><p>Episode {Math.min(totalEpisodes, episode + 1)}</p><button onClick={() => changeEpisode(episode + 1)}>Play now</button><button onClick={() => setCountdown(null)}>Cancel</button></div></div>}
         </div>
         <section className="watch-controls">
